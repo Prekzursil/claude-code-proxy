@@ -205,17 +205,33 @@ class ClaudeRequest {
   }
 
   writeCredentialsToFile(credentialsJson) {
+    // Never persist unvalidated data from the network: the payload must parse as
+    // JSON and carry the expected OAuth credential shape before it touches disk.
+    const parsed = JSON.parse(credentialsJson);
+    const oauth = parsed?.claudeAiOauth;
+    if (typeof oauth?.accessToken !== 'string' || typeof oauth?.refreshToken !== 'string' ||
+        typeof oauth?.expiresAt !== 'number') {
+      throw new TypeError('Refusing to persist credentials: unexpected shape');
+    }
+
     if (process.platform === 'win32') {
       // Write to native Windows location if it exists, otherwise use WSL
       const nativePath = path.join(os.homedir(), '.claude', '.credentials.json');
       if (fs.existsSync(nativePath)) {
-        fs.writeFileSync(nativePath, credentialsJson, 'utf8');
+        // Atomic replace (write temp file + rename) so a crash never leaves a
+        // truncated credentials file behind.
+        const tempPath = `${nativePath}.tmp`;
+        fs.writeFileSync(tempPath, credentialsJson, 'utf8');
+        fs.renameSync(tempPath, nativePath);
       } else {
         execSync(`wsl tee ~/.claude/.credentials.json`, { input: credentialsJson, encoding: 'utf8', timeout: 10000 });
       }
     } else {
       const credentialsPath = path.join(os.homedir(), '.claude', '.credentials.json');
-      fs.writeFileSync(credentialsPath, credentialsJson, 'utf8');
+      const tempPath = `${credentialsPath}.tmp`;
+      fs.writeFileSync(tempPath, credentialsJson, 'utf8');
+      fs.chmodSync(tempPath, 0o600);
+      fs.renameSync(tempPath, credentialsPath);
     }
   }
 
@@ -240,6 +256,12 @@ class ClaudeRequest {
       const credentialsData = this.loadCredentialsFromFile();
       const credentials = JSON.parse(credentialsData);
       const refreshToken = credentials.claudeAiOauth?.refreshToken;
+
+      // Validate the credential read from disk before it is used in an
+      // outbound request: a well-formed OAuth token is an opaque ASCII string.
+      if (typeof refreshToken !== 'string' || refreshToken.length < 8 || !/^[A-Za-z0-9._~+/=-]+$/.test(refreshToken)) {
+        throw new Error('Malformed refresh token in stored credentials');
+      }
 
       const refreshData = {
         grant_type: 'refresh_token',
@@ -476,7 +498,7 @@ class ClaudeRequest {
       this.streamResponse(res, claudeResponse);
       
     } catch (error) {
-      console.error('Claude request error:', error.message);
+      Logger.error('Claude request error:', error.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: error.message }));
     }
