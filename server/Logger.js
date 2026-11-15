@@ -2,8 +2,6 @@ const { Transform } = require('stream');
 
 // Matches Anthropic API keys and bearer-style tokens so they never reach the console in clear text
 const TOKEN_PATTERN = /\b(sk-ant-[A-Za-z0-9._-]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,})/g;
-// Control characters (excluding \t) that enable log forging / terminal escape attacks
-const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 // Object keys whose values are always sensitive
 const SENSITIVE_KEY = /authorization|token|secret|api[-_]?key|password|cookie/i;
 
@@ -18,51 +16,61 @@ class Logger {
   }
 
   /**
-   * Make a value safe to write to a log: strips control characters, collapses
-   * line breaks (log-forging defense) and redacts credential material.
+   * Redact and encode a string for safe logging:
+   * - the JSON.stringify round-trip escapes `\r`, `\n` and all other control
+   *   characters, so a crafted payload cannot forge log entries
+   * - credential material is masked
    */
-  static _clean(value, depth = 0) {
+  static _sanitizeString(s) {
+    return JSON.stringify(s).slice(1, -1).replace(TOKEN_PATTERN, '[REDACTED]');
+  }
+
+  /**
+   * Make any value safe to write to a log. Strings and objects are JSON
+   * encoded (control characters escaped), values under sensitive keys and
+   * inline credential patterns are replaced with '[REDACTED]'.
+   */
+  static redact(value) {
     if (typeof value === 'string') {
-      return value
-        .replace(CONTROL_CHARS, '')
-        .replace(/[\r\n]+/g, ' ')
-        .replace(TOKEN_PATTERN, (m) => (m.startsWith('Bearer') ? 'Bearer [REDACTED]' : '[REDACTED]'));
+      return this._sanitizeString(value);
     }
-    if (depth >= 3 || value === null || typeof value !== 'object') {
-      return value;
+    if (value instanceof Error) {
+      return this._sanitizeString(`${value.name}: ${value.message}`);
     }
-    if (Array.isArray(value)) {
-      return value.map((v) => this._clean(v, depth + 1));
+    if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
+      return `[${typeof value}]`;
     }
-    const cleaned = {};
-    for (const [key, val] of Object.entries(value)) {
-      cleaned[key] = SENSITIVE_KEY.test(key) && typeof val === 'string' && val.length > 0 ? '[REDACTED]' : this._clean(val, depth + 1);
+    try {
+      return this._sanitizeString(JSON.stringify(value, (key, val) => (
+        (SENSITIVE_KEY.test(key) && typeof val === 'string' && val.length > 0) ? '[REDACTED]' : val
+      )));
+    } catch {
+      return '[unserializable]';
     }
-    return cleaned;
   }
 
   static debug(...args) {
     if (this.getLogLevel() >= 3) {
-      console.log('DEBUG:', ...args.map((a) => this._clean(a)));
+      console.log('DEBUG:', ...args.map((a) => this.redact(a)));
     }
   }
 
   static trace(...args) {
     if (this.getLogLevel() >= 4) {
-      console.log('TRACE:', ...args.map((a) => this._clean(a)));
+      console.log('TRACE:', ...args.map((a) => this.redact(a)));
     }
   }
 
   static info(...args) {
-    console.log('INFO:', ...args.map((a) => this._clean(a)));
+    console.log('INFO:', ...args.map((a) => this.redact(a)));
   }
 
   static warn(...args) {
-    console.warn('WARN:', ...args.map((a) => this._clean(a)));
+    console.warn('WARN:', ...args.map((a) => this.redact(a)));
   }
 
   static error(...args) {
-    console.error('ERROR:', ...args.map((a) => this._clean(a)));
+    console.error('ERROR:', ...args.map((a) => this.redact(a)));
   }
 
   static createDebugStream(label = 'Stream chunk', textExtractor = null) {
