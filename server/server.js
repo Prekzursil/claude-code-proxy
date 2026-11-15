@@ -74,8 +74,34 @@ function getClientIP(req) {
          '127.0.0.1';
 }
 
+// Escape untrusted text before embedding it in HTML responses
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+// Validate the request path before it is used in any routing/security decision.
+// Returns the path when it is well-formed, or null when the request target is malformed.
+function safePathname(rawPathname) {
+  if (typeof rawPathname !== 'string' || rawPathname.length > 512) {
+    return null;
+  }
+  if (!/^\/[A-Za-z0-9._/-]*$/.test(rawPathname)) {
+    return null;
+  }
+  return rawPathname;
+}
+
 function serveStaticFile(res, filePath, contentType) {
-  const staticPath = path.join(__dirname, 'static', filePath);
+  const staticRoot = path.join(__dirname, 'static');
+  const staticPath = path.join(staticRoot, filePath);
+  // Defense-in-depth: refuse to serve anything that resolves outside the static directory
+  if (!path.resolve(staticPath).startsWith(staticRoot + path.sep)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('Forbidden');
+    return;
+  }
   fs.readFile(staticPath, 'utf8', (err, data) => {
     if (err) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -121,7 +147,13 @@ function isRunningInDocker() {
 async function handleRequest(req, res) {
   const clientIP = getClientIP(req);
   const parsedUrl = url.parse(req.url, true);
-  const pathname = parsedUrl.pathname;
+  const pathname = safePathname(parsedUrl.pathname);
+
+  if (pathname === null) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('Bad request');
+    return;
+  }
 
   Logger.info(`${req.method} ${pathname} from ${clientIP}`);
 
@@ -209,7 +241,7 @@ async function handleRequest(req, res) {
         <head><title>Authentication Failed</title></head>
         <body>
           <h1>Authentication Failed</h1>
-          <p>Error: ${error.message}</p>
+          <p>Error: ${escapeHtml(error.message)}</p>
           <p><a href="/auth/login">Try again</a></p>
         </body>
         </html>

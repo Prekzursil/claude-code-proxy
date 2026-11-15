@@ -108,6 +108,13 @@ class OAuthManager {
           throw new Error('No refresh token available');
         }
 
+        // Validate the credential read from disk before it is used in an
+        // outbound request: a well-formed OAuth token is an opaque ASCII string.
+        if (typeof tokens.refresh_token !== 'string' || tokens.refresh_token.length < 8 ||
+            !/^[A-Za-z0-9._~+/=-]+$/.test(tokens.refresh_token)) {
+          throw new Error('Malformed refresh token in stored credentials');
+        }
+
         const payload = JSON.stringify({
           grant_type: 'refresh_token',
           refresh_token: tokens.refresh_token,
@@ -209,18 +216,31 @@ class OAuthManager {
    */
   saveTokens(tokens) {
     try {
+      // Never persist unvalidated data from the network: both token fields must
+      // be well-formed opaque strings before anything touches disk.
+      if (typeof tokens?.access_token !== 'string' || tokens.access_token.length < 8 ||
+          !/^[A-Za-z0-9._~+/=-]+$/.test(tokens.access_token) ||
+          typeof tokens?.refresh_token !== 'string' || tokens.refresh_token.length < 8 ||
+          !/^[A-Za-z0-9._~+/=-]+$/.test(tokens.refresh_token)) {
+        throw new TypeError('Refusing to save tokens: unexpected token shape');
+      }
+
       // Ensure directory exists
       const dir = path.dirname(this.tokenPath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
 
-      fs.writeFileSync(this.tokenPath, JSON.stringify(tokens, null, 2), 'utf8');
+      // Atomic replace (write temp file + rename) so a crash never leaves a
+      // truncated token file behind.
+      const tempPath = `${this.tokenPath}.tmp`;
+      fs.writeFileSync(tempPath, JSON.stringify(tokens, null, 2), 'utf8');
 
       // Set file permissions to 600 (owner read/write only) on Unix
       if (process.platform !== 'win32') {
-        fs.chmodSync(this.tokenPath, 0o600);
+        fs.chmodSync(tempPath, 0o600);
       }
+      fs.renameSync(tempPath, this.tokenPath);
 
       Logger.info('Tokens saved successfully');
     } catch (error) {

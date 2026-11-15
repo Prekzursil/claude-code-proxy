@@ -18,21 +18,21 @@ const OAuthManager = require('./OAuthManager');
 
 // Import server components after mocking
 const url = require('url');
-const parseBody = (req) => {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', chunk => {
-      body += chunk.toString();
-    });
-    req.on('end', () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch (error) {
-        reject(new Error(`Invalid JSON: ${error.message}`));
-      }
-    });
-    req.on('error', reject);
-  });
+
+// Escape untrusted text before embedding it in HTML responses (mirrors server.js)
+const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[c]));
+
+// Validate the request path before it is used in any routing/security decision (mirrors server.js)
+const safePathname = (rawPathname) => {
+  if (typeof rawPathname !== 'string' || rawPathname.length > 512) {
+    return null;
+  }
+  if (!/^\/[A-Za-z0-9._/-]*$/.test(rawPathname)) {
+    return null;
+  }
+  return rawPathname;
 };
 
 describe('OAuth Routes Integration Tests', () => {
@@ -72,7 +72,12 @@ describe('OAuth Routes Integration Tests', () => {
     // Create test server with OAuth routes
     const handleRequest = async (req, res) => {
       const parsedUrl = url.parse(req.url, true);
-      const pathname = parsedUrl.pathname;
+      const pathname = safePathname(parsedUrl.pathname);
+      if (pathname === null) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Bad request');
+        return;
+      }
 
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -139,7 +144,7 @@ describe('OAuth Routes Integration Tests', () => {
             <head><title>Authentication Failed</title></head>
             <body>
               <h1>Authentication Failed</h1>
-              <p>Error: ${error.message}</p>
+              <p>Error: ${escapeHtml(error.message)}</p>
             </body>
             </html>
           `);
