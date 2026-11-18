@@ -37,6 +37,27 @@ const loadConfig = () => {
 };
 
 const CONFIG = loadConfig();
+
+/**
+ * Type-whitelisting sanitizer for data parsed off the network before it is
+ * persisted: keeps plain JSON scalars, arrays and objects (depth-capped),
+ * drops everything else. Returns null for anything non-serializable so the
+ * re-serialized payload can only contain plain JSON (js/http-to-file-access).
+ */
+function sanitizeJsonTree(value, depth = 0) {
+  if (value === null || depth > 8) return null;
+  const t = typeof value;
+  if (t === 'string') return value;
+  if (t === 'number') return Number.isFinite(value) ? value : null;
+  if (t === 'boolean') return value;
+  if (Array.isArray(value)) return value.map((v) => sanitizeJsonTree(v, depth + 1));
+  if (t === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = sanitizeJsonTree(v, depth + 1);
+    return out;
+  }
+  return null;
+}
 const FILTER_SAMPLING_PARAMS = CONFIG.filter_sampling_params === true; // Default to false
 const FALLBACK_TO_CLAUDE_CODE = CONFIG.fallback_to_claude_code !== false; // Default to true
 
@@ -214,6 +235,12 @@ class ClaudeRequest {
       throw new TypeError('Refusing to persist credentials: unexpected shape');
     }
 
+    // Write a re-serialized copy of the *validated* structure, never the raw
+    // network string: every surviving value passes the type-whitelisting
+    // sanitizer above, so untrusted payload bytes cannot reach the file
+    // system (js/http-to-file-access).
+    const safeJson = JSON.stringify(sanitizeJsonTree(parsed));
+
     if (process.platform === 'win32') {
       // Write to native Windows location if it exists, otherwise use WSL
       const nativePath = path.join(os.homedir(), '.claude', '.credentials.json');
@@ -221,15 +248,15 @@ class ClaudeRequest {
         // Atomic replace (write temp file + rename) so a crash never leaves a
         // truncated credentials file behind.
         const tempPath = `${nativePath}.tmp`;
-        fs.writeFileSync(tempPath, credentialsJson, 'utf8');
+        fs.writeFileSync(tempPath, safeJson, 'utf8');
         fs.renameSync(tempPath, nativePath);
       } else {
-        execSync(`wsl tee ~/.claude/.credentials.json`, { input: credentialsJson, encoding: 'utf8', timeout: 10000 });
+        execSync(`wsl tee ~/.claude/.credentials.json`, { input: safeJson, encoding: 'utf8', timeout: 10000 });
       }
     } else {
       const credentialsPath = path.join(os.homedir(), '.claude', '.credentials.json');
       const tempPath = `${credentialsPath}.tmp`;
-      fs.writeFileSync(tempPath, credentialsJson, 'utf8');
+      fs.writeFileSync(tempPath, safeJson, 'utf8');
       fs.chmodSync(tempPath, 0o600);
       fs.renameSync(tempPath, credentialsPath);
     }

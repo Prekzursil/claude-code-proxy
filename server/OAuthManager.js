@@ -232,9 +232,20 @@ class OAuthManager {
       }
 
       // Atomic replace (write temp file + rename) so a crash never leaves a
-      // truncated token file behind.
+      // truncated token file behind. Persist ONLY the validated projection —
+      // the two regex-checked token strings and a coerced numeric expiry —
+      // never the raw network object, whose extra fields are untrusted
+      // (js/http-to-file-access).
+      const expiresAtRaw = tokens.expires_at;
+      const safeTokens = {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at: typeof expiresAtRaw === 'number' && Number.isFinite(expiresAtRaw)
+          ? expiresAtRaw
+          : Number(expiresAtRaw) || 0,
+      };
       const tempPath = `${this.tokenPath}.tmp`;
-      fs.writeFileSync(tempPath, JSON.stringify(tokens, null, 2), 'utf8');
+      fs.writeFileSync(tempPath, JSON.stringify(safeTokens, null, 2), 'utf8');
 
       // Set file permissions to 600 (owner read/write only) on Unix
       if (process.platform !== 'win32') {
