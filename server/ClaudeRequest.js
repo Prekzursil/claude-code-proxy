@@ -239,6 +239,16 @@ class ClaudeRequest {
     // network string: every surviving value passes the type-whitelisting
     // sanitizer above, so untrusted payload bytes cannot reach the file
     // system (js/http-to-file-access).
+    //
+    // BY-DESIGN RESIDUAL (documented, not dismissable elsewhere): the file's
+    // entire purpose is to persist OAuth credential strings issued by the
+    // Anthropic token endpoint — the token values are, by definition, data
+    // that originated from an HTTP response. Every hardening that can be
+    // applied without destroying the feature IS applied: shape validation
+    // above, type-whitelisting re-serialization, fixed destination path
+    // under ~/.claude, atomic replace, chmod 0600. CodeQL's taint model
+    // cannot see "validated credential material written to the credential
+    // store" as safe, so the two sinks below carry inline suppressions.
     const safeJson = JSON.stringify(sanitizeJsonTree(parsed));
 
     if (process.platform === 'win32') {
@@ -248,6 +258,7 @@ class ClaudeRequest {
         // Atomic replace (write temp file + rename) so a crash never leaves a
         // truncated credentials file behind.
         const tempPath = `${nativePath}.tmp`;
+        // codeql[js/http-to-file-access] — validated credential store write; see BY-DESIGN RESIDUAL above
         fs.writeFileSync(tempPath, safeJson, 'utf8');
         fs.renameSync(tempPath, nativePath);
       } else {
@@ -256,6 +267,7 @@ class ClaudeRequest {
     } else {
       const credentialsPath = path.join(os.homedir(), '.claude', '.credentials.json');
       const tempPath = `${credentialsPath}.tmp`;
+      // codeql[js/http-to-file-access] — validated credential store write; see BY-DESIGN RESIDUAL above
       fs.writeFileSync(tempPath, safeJson, 'utf8');
       fs.chmodSync(tempPath, 0o600);
       fs.renameSync(tempPath, credentialsPath);
